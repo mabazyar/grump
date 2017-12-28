@@ -134,7 +134,11 @@ def listVMsAndFeedNetbox():
     cluster = hostClusterPair['cluster']
     hostname = hostClusterPair['name']
     netboxify(hostid, cluster, hostname)
-  
-getAuthenticated()
-listVMsAndFeedNetbox()
+
+def main():
+  getAuthenticated()
+  listVMsAndFeedNetbox()
+
+if __name__ == "__main__":
+  main()
 
