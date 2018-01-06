@@ -129,7 +129,6 @@ def vmsummary(summary, guest):
     config = summary.config
     net = getNICs(summary, guest)
     vmsum['mem'] = str(config.memorySizeMB)
-    #vmsum['diskGB'] = str("%.2f" % (summary.storage.committed / 1024**3))
     vmsum['diskGB'] = str(diskInfo(summary))
     vmsum['cpu'] = str(config.numCpu)
     vmsum['path'] = config.vmPathName
