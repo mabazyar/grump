@@ -1,6 +1,24 @@
 #!/usr/bin/python3
+"""
+Written by Mohammadali Bazyar
+Github: https://github.com/mabazyar
+Purpose: Grabs the statistical information available on a vSphere server for each VM and pumps them along to Netbox.
 
-import requests, json, sys, getpass, configparser
+"""
+from __future__ import print_function
+
+from pyVmomi import vim
+
+from pyVim.connect import SmartConnectNoSSL, SmartConnect,Disconnect
+
+import argparse
+import atexit
+import getpass
+import json
+import ssl
+import requests
+import configparser
+
 
 configFile="./grump.conf"
 config = configparser.ConfigParser()
@@ -19,74 +37,148 @@ def configSectionMap(section):
             serializedSection[option] = None
     return serializedSection
 
-netboxToken=configSectionMap("netbox")['token']
-netboxHeader = {'Authorization': 'token {}'.format(netboxToken)}
-netboxURL= configSectionMap("netbox")['server']
 
-vcenterURL = configSectionMap("vcenter")['server']
-vcenterUserSuffix = configSectionMap("user")['suffix']
+def checkArgs():
+   args = GetArgs()
+   netboxToken=configSectionMap("netbox")['token']
+   netboxHeader = {'Authorization': 'token {}'.format(netboxToken)}
+   netboxURL= configSectionMap("netbox")['server']
 
-s = requests.Session()
+   argDict = {}
+   
+   if args.config:
+      global configFile
+      configFile = args.config
+   
+   
+   if args.vcenter:
+      host = args.vcenter
+   else:
+      host = configSectionMap("vcenter")['server']
 
+   
+   if args.user:
+      user = args.user
+   else:
+      vcenterUserSuffix = configSectionMap("user")['suffix']
+      user = configSectionMap("user")['username'] + vcenterUserSuffix
 
-def getUserPass():
-  username = configSectionMap("user")['username'] + vcenterUserSuffix
-  
-  try:
-    password = getpass.getpass()
-  except Exception as error:
-    print('ERROR', error)
-  
-  authKey = {'username': username, 'password': password}
-  return authKey
+   
+   if args.port:
+      port = args.port
 
-def getAuthenticated():
-  authPair = getUserPass()
-  username = authPair['username']
-  password = authPair['password']
+   
+   if args.password:
+      password = args.password
+   else:
+      password = getpass.getpass(prompt='Enter password for host %s and '
+                                        'user %s: ' % (host,user))
 
-  s.auth = (username, password)
-  s.post(vcenterURL + '/rest/com/vmware/cis/session')
+   
+   argDict = {"password": password, "configFile": configFile, "host": host, "user": user, "port": port}
 
-def rawJsonHosts():
-  return(s.get(vcenterURL + '/rest/vcenter/host').json())
-
-
-def getCluster(host):
-  hostname = host.split(".")[0]
-  hostnameList = hostname.split("-")
-  if len(hostnameList) > 3:
-    cluster = hostnameList[-1]
-  else:
-    cluster = hostnameList[2]
-  return cluster
-
-def listHostsAndClusters():
-  dictList = rawJsonHosts()['value']
-  hostAndClusterList = []
-  for dict in dictList:
-    hostAndClusterList += [{"hostid": dict["host"], "cluster": getCluster(dict["name"]), "name": dict["name"]}]
-  return hostAndClusterList
-
-def listVMsInHost(host):
-  URL = vcenterURL + "/rest/vcenter/vm?filter.hosts=" + host
-  return s.get(URL).json()
-
-def netboxGetQuery(url):
-  response = requests.get(url, headers=netboxHeader)
-  return response
-
-def feedNetboxVM(vmData):
-  virtualizationURL = netboxURL + "/api/virtualization/virtual-machines/"
-  response = requests.post(virtualizationURL, vmData, headers=netboxHeader)
-  print(response.text)
+   return argDict
 
 
 
-def getClusterID():
-  clusterUrl = netboxURL + '/api/virtualization/clusters/'
-  clusterList = netboxGetQuery(clusterUrl).json()['results']
+def GetArgs():
+    """
+    Supports the command-line arguments listed below.
+    """
+    parser = argparse.ArgumentParser(
+        description='Process args for retrieving all the Virtual Machines')
+    parser.add_argument('-v', '--vcenter', required=True, action='store',
+                        help='Remote vcenter to connect to')
+    parser.add_argument('-o', '--port', type=int, default=443, action='store',
+                        help='Port to connect on')
+    parser.add_argument('-u', '--user', required=True, action='store',
+                        help='User name to use when connecting to host')
+    parser.add_argument('-p', '--password', required=False, action='store',
+                        help='Password to use when connecting to host')
+    parser.add_argument('-c', '--config', required=False, action='store',
+                       help='Config file path contains the vcenter and netbox details')
+    args = parser.parse_args()
+    return args
 
+
+def getNICs(summary, guest):
+    nics = {}
+    for nic in guest.net:
+        if nic.network:  # Only return adapter backed interfaces
+            if nic.ipConfig is not None and nic.ipConfig.ipAddress is not None:
+                nics[nic.macAddress] = {}  # Use mac as uniq ID for nic
+                nics[nic.macAddress]['netlabel'] = nic.network
+                ipconf = nic.ipConfig.ipAddress
+                for ip in ipconf:
+                    if ":" not in ip.ipAddress:  # Only grab ipv4 addresses
+                        nics[nic.macAddress]['ip'] = ip.ipAddress
+                        nics[nic.macAddress]['prefix'] = ip.prefixLength
+                        nics[nic.macAddress]['connected'] = nic.connected
+    return nics
+
+def diskInfo(summary):
+  if not hasattr(summary, 'storage'):
+    return "0"
+  elif not hasattr(summary.storage, "committed"):
+    return "0"
+  return int(summary.storage.committed / 1024**3)
+   
+
+def vmsummary(summary, guest):
+    vmsum = {}
+    config = summary.config
+    net = getNICs(summary, guest)
+    vmsum['mem'] = str(config.memorySizeMB)
+    #vmsum['diskGB'] = str("%.2f" % (summary.storage.committed / 1024**3))
+    vmsum['diskGB'] = str(diskInfo(summary))
+    vmsum['cpu'] = str(config.numCpu)
+    vmsum['path'] = config.vmPathName
+    vmsum['ostype'] = config.guestFullName
+    vmsum['state'] = summary.runtime.powerState
+    vmsum['annotation'] = config.annotation if config.annotation else ''
+    vmsum['net'] = net
+
+    return vmsum
+
+
+def prepareNetworkComment(netDict):
+    netComment = "\n"
+    for key in netDict:
+        netComment += "-" + key + " ==> {"
+        if 'ip' in netDict[key].keys():
+            netComment += "IP: " + netDict[key]['ip'] + ", "
+        if 'prefix' in netDict[key].keys():
+            netComment += "Prefix: " + str(netDict[key]['prefix']) + ", "
+        if 'netlabel' in netDict[key].keys():
+            netComment += "Netlabel: " + netDict[key]['netlabel']
+        netComment += "} \n"
+    return netComment
+
+def netboxQuery(type, payload = ""):
+    netboxToken=configSectionMap("netbox")['token']
+    netboxHeader = {'Authorization': 'token {}'.format(netboxToken)}
+    netboxURL= configSectionMap("netbox")['server']
+    if type == "get":
+      url = netboxURL + '/api/virtualization/clusters/'
+      response = requests.get(url, headers=netboxHeader)
+      return response
+    if type == "post":
+      url = netboxURL + "/api/virtualization/virtual-machines/"
+      response = requests.post(url, payload, headers=netboxHeader)
+    return response
+
+
+
+def getNetboxClusterName(dcName, clusterName, hostName):
+    if clusterName == hostName:
+        return dcName.lower()
+    else:
+        return dcName.lower() + "-" + clusterName.lower()
+
+
+
+def clusterNameIdDict():
+  clusterList = netboxQuery("get").json()['results']
   clusterDic = {}
   for cluster in clusterList:
     clusterName = cluster['name']
@@ -94,51 +186,72 @@ def getClusterID():
     clusterDic[clusterName] = clusterID
   return clusterDic
 
-def getDiskID(vmID):
-  URL = vcenterURL + "/rest/vcenter/vm/" + vmID + "/hardware/disk"
-  diskList = s.get(URL).json().get('value', None) 
-  if type(diskList) == list:
-    print(diskList[0])
-    diskID = diskList[0].get('disk', None)
-    return diskID
-  else:
-    return ""
-
-def getDiskCapacity(vmID):
-  diskID = getDiskID(vmID)
-  URL = vcenterURL + "/rest/vcenter/vm/" + vmID + "/hardware/disk/" + diskID
-  vmDiskDetails = s.get(URL).json()['value']
-  capacity2GB = str(int(int(vmDiskDetails.get('capacity',0))/1073741824))
-  return capacity2GB
-
-def netboxify(hostid, cluster, hostname):
-  clusterDic = getClusterID()
-  for vm in listVMsInHost(hostid)['value']:
-    print(vm)
-    vmID = vm.get('vm', None)
-    name = vm.get('name', None) 
-    vcpus = vm.get('cpu_count', None) 
-    memory = vm.get('memory_size_MiB', None) 
-    clusterID = clusterDic[cluster]
-    role = 2
-    capacity = getDiskCapacity(vmID)
-    comments = "vmID:" + vm['vm'] + " hostID:" + hostid + " Host:" + hostname
+def netboxify(name, clusterID, vcpus, memory, role, comments, capacity):
     netboxDict = {"name":name, "cluster": clusterID, "vcpus":vcpus, "memory":memory, "role":role, "comments":comments, "disk": capacity}
-    feedNetboxVM(netboxDict)
-    
-  
+    return netboxDict
 
-def listVMsAndFeedNetbox():
-  for hostClusterPair in listHostsAndClusters():
-    hostid = hostClusterPair['hostid']
-    cluster = hostClusterPair['cluster']
-    hostname = hostClusterPair['name']
-    netboxify(hostid, cluster, hostname)
+def rectifyNoneType(result):
+  if result == None or len(result) == 0:
+    return ""
+  else:
+    return "-" + result
+
+def prepareComment(net, ostype, path, annotation, state, hostname):
+    comment = \
+    "Network:" + prepareNetworkComment(net) + "\n\n" + \
+    "OS Type:\n" + rectifyNoneType(ostype) + "\n\n" + \
+    "Hard Disk Path:\n" + rectifyNoneType(path) + "\n\n" + \
+    "Host Server:\n" + rectifyNoneType(hostname) + "\n\n" + \
+    "State:\n" + rectifyNoneType(state) + "\n\n" + \
+    "Annotation:\n" + rectifyNoneType(annotation)
+    return comment
+
 
 def main():
-  getAuthenticated()
-  listVMsAndFeedNetbox()
+    """
+    Iterate through all datacenters and list VM info.
+    """
+    argDict = checkArgs()
 
+    if hasattr(ssl, '_create_unverified_context'):
+      context = ssl._create_unverified_context()
+    si = SmartConnect(host=argDict["host"],
+                      user=argDict["user"],
+                      pwd=argDict["password"],
+                      port=int(argDict["port"]),
+                      sslContext=context)
+    if not si:
+        print("Could not connect to the specified host using specified "
+              "username and password")
+        return -1
+
+    atexit.register(Disconnect, si)
+
+    content = si.RetrieveContent()
+    children = content.rootFolder.childEntity
+    for child in children:  # Iterate though DataCenters
+        dc = child
+        clusters = dc.hostFolder.childEntity
+        for cluster in clusters:  # Iterate through the clusters in the DC
+            hosts = cluster.host  # Variable to make pep8 compliance
+            for host in hosts:  # Iterate through Hosts in the Cluster
+                hostname = host.summary.config.name
+                # Retrieves all the VMs
+                vms = host.vm
+                for vm in vms:  # Iterate through each VM on the host
+                    vmname = vm.summary.config.name
+                    summary = vmsummary(vm.summary, vm.guest)
+                    vcpus = summary['cpu']
+                    memory = summary['mem']
+                    comments = prepareComment(summary['net'], summary['ostype'], summary['path'], summary['annotation'], summary['state'], hostname)
+                    capacity = summary['diskGB']
+                    clusterName = getNetboxClusterName(dc.name, cluster.name, hostname)
+                    clusterID = clusterNameIdDict()[clusterName]
+                    role = "2"
+                    vmData = netboxify(vmname, clusterID, vcpus, memory, role, comments, capacity)
+                    print(netboxQuery("post", vmData).text)
+                    
+# Start program
 if __name__ == "__main__":
-  main()
+    main()
 
