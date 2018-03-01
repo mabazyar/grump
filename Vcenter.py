@@ -108,9 +108,10 @@ class Vcenter():
                         annotation = summary['annotation']
                         state = summary['state']
                         disk = summary['diskGB']
+                        clustername = cluster.name
                                                 
                         vmSerializedData = {"name": vmname, "vcpus": vcpus, "memory": memory, "network": network, "os": os,
                                           "path": path, "comment": annotation, "state": state, "disk": disk, 
-                                          "hostname": hostname}
+                                          "hostname": hostname, "cluster": clustername}
                         yield vmSerializedData
                         
