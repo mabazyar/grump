@@ -84,8 +84,6 @@ class Vcenter():
         return vmsum
     
     def retrieveVMs(self):
-        id = 0
-        vmInventory = {}
         for child in self.children:  # Iterate though DataCenters
             dc = child
             clusters = dc.hostFolder.childEntity
@@ -110,12 +108,9 @@ class Vcenter():
                         annotation = summary['annotation']
                         state = summary['state']
                         disk = summary['diskGB']
-                        
-                        
-                        vmSerializedData = {"name":summary, "vcpus": vcpus, "memory": memory, "network": network, "os": os,
-                                          "path": path, "annotation": annotation, "state": state, "disk": disk, 
+                                                
+                        vmSerializedData = {"name": vmname, "vcpus": vcpus, "memory": memory, "network": network, "os": os,
+                                          "path": path, "comment": annotation, "state": state, "disk": disk, 
                                           "hostname": hostname}
+                        yield vmSerializedData
                         
-                        vmInventory[str(id)] = vmSerializedData
-                        id += 1
-        return vmInventory
